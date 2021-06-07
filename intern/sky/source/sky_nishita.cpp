@@ -17,6 +17,9 @@
 #include "sky_float3.h"
 #include "sky_model.h"
 
+#include <cstdint>
+#include <cstring>
+
 /* Constants */
 static const float rayleigh_scale = 8e3f;        // Rayleigh scale height (m)
 static const float mie_scale = 1.2e3f;           // Mie scale height (m)
@@ -27,6 +30,8 @@ static const float earth_radius = 6360e3f;       // radius of Earth (m)
 static const float atmosphere_radius = 6420e3f;  // radius of atmosphere (m)
 static const int steps = 32;                     // segments of primary ray
 static const int steps_light = 16;               // segments of sun connection ray
+static const int samples = 10;                   // samples for indirect scattering
+static const int bounce_depth = 5;               // recursion depth of indirect scattering
 static const int num_wavelengths = 21;           // number of wavelengths
 static const int min_wavelength = 380;           // lowest sampled wavelength (nm)
 static const int max_wavelength = 780;           // highest sampled wavelength (nm)
@@ -132,8 +137,8 @@ static float phase_mie(float mu)
          (8.0f * M_PI_F * (2.0f + sqr_G) * powf((1.0f + sqr_G - 2.0f * mie_G * mu), 1.5));
 }
 
-/* Intersection helpers */
-static bool surface_intersection(float3 pos, float3 dir)
+/* Old intersection helpers */
+static bool old_surface_intersection(float3 pos, float3 dir)
 {
   if (dir.z >= 0) {
     return false;
@@ -147,7 +152,7 @@ static bool surface_intersection(float3 pos, float3 dir)
   return false;
 }
 
-static float3 atmosphere_intersection(float3 pos, float3 dir)
+static float3 old_atmosphere_intersection(float3 pos, float3 dir)
 {
   float b = -2.0f * dot(dir, -pos);
   float c = len_squared(pos) - sqr(atmosphere_radius);
@@ -155,10 +160,10 @@ static float3 atmosphere_intersection(float3 pos, float3 dir)
   return make_float3(pos.x + dir.x * t, pos.y + dir.y * t, pos.z + dir.z * t);
 }
 
-static float3 ray_optical_depth(float3 ray_origin, float3 ray_dir)
+static float3 old_ray_optical_depth(float3 ray_origin, float3 ray_dir)
 {
   /* this code computes the optical depth along a ray through the atmosphere */
-  float3 ray_end = atmosphere_intersection(ray_origin, ray_dir);
+  float3 ray_end = old_atmosphere_intersection(ray_origin, ray_dir);
   float ray_length = distance(ray_origin, ray_end);
 
   /* to compute the optical depth, we step along the ray in segments and
@@ -191,6 +196,111 @@ static float3 ray_optical_depth(float3 ray_origin, float3 ray_dir)
   return optical_depth * segment_length;
 }
 
+/* Intersection helpers */
+static float surface_intersection(float3 pos, float3 dir)
+{
+  float u = dot(dir, pos);
+  if (u > 0.0f)
+    return 1e10f;  // Ray points away from sphere
+
+  float v = len_squared(pos) - sqr(earth_radius);
+  float d = u * u - v;
+
+  if (d < 0.0f) {
+    // Miss
+    return 1e10f;
+  }
+  else {
+    // Assume ray doesn't start inside earth => smaller of the two solutions is nearest hit.
+    return -u - sqrtf(d);
+  }
+}
+
+static float atmosphere_intersection(float3 pos, float3 dir)
+{
+  float u = dot(dir, pos);
+  float v = len_squared(pos) - sqr(atmosphere_radius);
+  float d = u * u - v;
+  // Assume that the ray starts inside atmosphere => 2 guaranteed hits,
+  // smaller one will be behind origin so use larger one.
+  return -u + sqrtf(d);
+}
+
+static float3 ray_optical_depth(float3 ray_origin, float3 ray_dir, float ray_length)
+{
+  // Instead of ray marching, this code uses Gauss-Laguerre quadrature with four nodes.
+  // This is faster and gives more precise results.
+  float rescale = 0.1f;
+
+  float nodes[4] = {0.322548f, 1.74576f, 4.53662f, 9.39507f};
+  float weights[4] = {0.603154f, 0.357419f, 0.0388879f, 0.000539295f};
+
+  float3 t_to_pos = ray_dir * ray_length * rescale;
+
+  float3 v = make_float3(0.0f, 0.0f, 0.0f);
+  for (int i = 0; i < 4; i++) {
+    float t = nodes[i];
+    float3 P = ray_origin + t_to_pos * t;
+    float height = len(P) - earth_radius;
+    float3 density = make_float3(
+        density_rayleigh(height), density_mie(height), density_ozone(height));
+    v += density * weights[i] * expf(t);
+  }
+
+  v = v * (rescale * ray_length);
+  return v;
+}
+
+// RNG helpers
+static inline uint32_t rotl(const uint32_t x, int k)
+{
+  return (x << k) | (x >> (32 - k));
+}
+
+static float rng_get(uint32_t *rng)
+{
+  const uint32_t result = rng[0] + rng[3];
+  const uint32_t t = rng[1] << 9;
+
+  rng[2] ^= rng[0];
+  rng[3] ^= rng[1];
+  rng[1] ^= rng[2];
+  rng[0] ^= rng[3];
+  rng[2] ^= t;
+  rng[3] = rotl(rng[3], 11);
+
+  return float(result) / float(0xffffffff);
+}
+
+static void rng_seed(uint32_t *rng, uint32_t seed1, uint32_t seed2)
+{
+  uint64_t v[2];
+  v[0] = ((uint64_t)seed1) << 32 | seed2;
+
+  uint64_t z = (v[0] += 0x9e3779b97f4a7c15);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+  v[0] = z ^ (z >> 31);
+
+  z = (v[0] += 0x9e3779b97f4a7c15);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+  v[1] = z ^ (z >> 31);
+
+  memcpy(rng, v, sizeof(uint32_t) * 4);
+}
+
+static float3 sample_uniform_sphere(float u1, float u2)
+{
+  float z = 1.0f - 2.0f * u1;
+  float r = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+  float phi = M_2PI_F * u2;
+  float x = r * cosf(phi);
+  float y = r * sinf(phi);
+
+  return make_float3(x, y, z);
+}
+
 static void single_scattering(float3 ray_dir,
                               float3 sun_dir,
                               float3 ray_origin,
@@ -200,7 +310,7 @@ static void single_scattering(float3 ray_dir,
                               float *r_spectrum)
 {
   /* this code computes single-inscattering along a ray through the atmosphere */
-  float3 ray_end = atmosphere_intersection(ray_origin, ray_dir);
+  float3 ray_end = old_atmosphere_intersection(ray_origin, ray_dir);
   float ray_length = distance(ray_origin, ray_end);
 
   /* to compute the inscattering, we step along the ray in segments and accumulate
@@ -238,8 +348,8 @@ static void single_scattering(float3 ray_dir,
     optical_depth += segment_length * density;
 
     /* if the Earth isn't in the way, evaluate inscattering from the sun */
-    if (!surface_intersection(P, sun_dir)) {
-      float3 light_optical_depth = density_scale * ray_optical_depth(P, sun_dir);
+    if (!old_surface_intersection(P, sun_dir)) {
+      float3 light_optical_depth = density_scale * old_ray_optical_depth(P, sun_dir);
       float3 total_optical_depth = optical_depth + light_optical_depth;
 
       /* attenuation of light */
@@ -257,9 +367,9 @@ static void single_scattering(float3 ray_dir,
          * These terms are:
          * Tr(A<->B): Transmission from start to scattering position (tracked in optical_depth)
          * Tr(B<->C): Transmission from scattering position to light (computed in
-         * ray_optical_depth) sigma_s: Scattering density phase: Phase function of the scattering
-         * type (Rayleigh or Mie) L: Radiance coming from the light source segment_length: The
-         * length of the segment
+         * old_ray_optical_depth) sigma_s: Scattering density phase: Phase function of the
+         * scattering type (Rayleigh or Mie) L: Radiance coming from the light source
+         * segment_length: The length of the segment
          *
          * The code here is just that, with a bit of additional optimization to not store full
          * spectra for the optical depth
@@ -274,6 +384,143 @@ static void single_scattering(float3 ray_dir,
   }
 }
 
+static void multiple_scattering(float3 ray_dir,
+                                float3 sun_dir,
+                                float3 ray_origin,
+                                float air_density,
+                                float dust_density,
+                                float ozone_density,
+                                float *r_spectrum,
+                                uint32_t *rng,
+                                int depth)
+{
+  float ray_length = std::min(atmosphere_intersection(ray_origin, ray_dir),
+                              surface_intersection(ray_origin, ray_dir));
+
+  if (ray_length < 1e-2f)
+    return;
+
+  float segment_length = ray_length / steps;
+  float3 segment = segment_length * ray_dir;
+
+  float3 optical_depth = make_float3(0.0f, 0.0f, 0.0f);
+
+  float mu = dot(ray_dir, sun_dir);
+  float3 phase_function = make_float3(phase_rayleigh(mu), phase_mie(mu), 0.0f);
+  float3 density_scale = make_float3(air_density, dust_density, ozone_density);
+
+  float3 P = ray_origin + 0.5f * segment;  // Note: We evaluate in middle, but use full segment OD?
+
+  // Note: We split the in-scattered light into light coming directly from the sun
+  // and light coming from a second (and maybe third etc.) scattering event.
+  // Direct light from the sun is evaluated with ray marching, while indirect light
+  // is evaluated using Monte-Carlo integration.
+  for (int i = 0; i < steps; i++) {
+    float height = len(P) - earth_radius;
+    float3 density = density_scale * make_float3(density_rayleigh(height),
+                                                 density_mie(height),
+                                                 density_ozone(height));
+    optical_depth += segment_length * density;
+
+    // Integrate single scattering
+    if (surface_intersection(P, sun_dir) > 1e9f) {
+      float sun_distance = atmosphere_intersection(P, sun_dir);
+      float3 light_optical_depth = density_scale * ray_optical_depth(P, sun_dir, sun_distance);
+      float3 total_optical_depth = optical_depth + light_optical_depth;
+
+      for (int wl = 0; wl < num_wavelengths; wl++) {
+        float3 extinction_density = total_optical_depth * make_float3(rayleigh_coeff[wl],
+                                                                      1.11f * mie_coeff,
+                                                                      ozone_coeff[wl]);
+        float attenuation = expf(-reduce_add(extinction_density));
+
+        float3 scattering_density = density * make_float3(rayleigh_coeff[wl], mie_coeff, 0.0f);
+
+        r_spectrum[wl] += attenuation * reduce_add(phase_function * scattering_density) *
+                          irradiance[wl] * segment_length;
+      }
+    }
+
+    P += segment;
+  }
+
+  // Decide how many samples to use for evaluating indirectly scattered light.
+  int multiScatterSamples;
+  if (depth == 0) {
+    // If this ray is coming from the camera, take many samples.
+    multiScatterSamples = samples;
+  }
+  else if (depth < bounce_depth) {
+    // This is already a scattered ray, so only take one sample to avoid exponential growth.
+    multiScatterSamples = 1;
+  }
+  else {
+    // Stop iteration.
+    multiScatterSamples = 0;
+  }
+  for (int sample = 0; sample < multiScatterSamples; sample++) {
+    // Step 1: Sample random position along ray
+    // The logic used here is just a guess from my side - it's designed so that the
+    // sample density falls off exponentially along the ray. Since throughput decreases
+    // exponentially, this places most effort in areas that end up contributing a lot.
+#if 1
+    /* pdf(t) = c*exp(-4t/d), where d is the ray length.
+     * The probability pdf(t) is highest at the start and falls off to exp(-4) (~0.01) at the end.
+     * cdf(t) = c*d/4 * (1 - exp(-4t/d))
+     * t(zeta) = d/4 * log(c*d / (c*d - 4zeta))
+     * Normalization: c = 4exp(4)/((exp(4)-1) * d)
+     * Obvious optimization: Cancel d in c and t(zeta) */
+    const float cd = ((4 * expf(4)) / (expf(4) - 1));
+    float localT = 0.25f * logf(cd / (cd - 4 * rng_get(rng)));
+    float scatterT = ray_length * localT;
+    float pdfT = (cd / ray_length) * expf(-4 * localT);
+#else  // Alternative: Just pick uniformly along the path. Gives much more noise.
+    float scatterT = rng_get(rng) * ray_length;
+    float pdfT = 1.0f / ray_length;
+#endif
+    float3 scatterP = ray_origin + scatterT * ray_dir;
+
+    // Step 2: Sample random scattered direction
+    // This code currently samples uniformly on the sphere.
+    // Ideally, this should sample proportional to the Rayleigh or Mie phase function
+    // so that phase function and pdfD cancel out for lower noise.
+    // The two can be combined with MIS.
+    float3 scatterD = sample_uniform_sphere(rng_get(rng), rng_get(rng));
+    float mu = dot(ray_dir, scatterD);
+    float3 phase_function = make_float3(phase_rayleigh(mu), phase_mie(mu), 0.0f);
+    float pdfD = 0.25f / M_PI_F;
+
+    // Step 3: Evaluate inscattering
+    float scatterSpectrum[num_wavelengths] = {0};
+    multiple_scattering(scatterD,
+                        sun_dir,
+                        scatterP,
+                        air_density,
+                        dust_density,
+                        ozone_density,
+                        scatterSpectrum,
+                        rng,
+                        depth + 1);
+
+    // Step 4: Add contribution to spectrum
+    float3 optical_density = ray_optical_depth(ray_origin, ray_dir, scatterT);
+    float height = len(scatterP) - earth_radius;
+    float3 density = density_scale * make_float3(density_rayleigh(height),
+                                                 density_mie(height),
+                                                 density_ozone(height));
+    for (int wl = 0; wl < num_wavelengths; wl++) {
+      float3 extinction_density = optical_density * make_float3(rayleigh_coeff[wl],
+                                                                1.11f * mie_coeff,
+                                                                ozone_coeff[wl]);
+      float attenuation = expf(-reduce_add(extinction_density));
+      float3 scattering_density = density * make_float3(rayleigh_coeff[wl], mie_coeff, 0.0f);
+
+      r_spectrum[wl] += attenuation * reduce_add(phase_function * scattering_density) *
+                        scatterSpectrum[wl] / (pdfD * pdfT * multiScatterSamples);
+    }
+  }
+}
+
 void SKY_nishita_skymodel_precompute_texture(float *pixels,
                                              int stride,
                                              int start_y,
@@ -284,10 +531,10 @@ void SKY_nishita_skymodel_precompute_texture(float *pixels,
                                              float altitude,
                                              float air_density,
                                              float dust_density,
-                                             float ozone_density)
+                                             float ozone_density,
+                                             bool multi_scattering)
 {
   /* calculate texture pixels */
-  float spectrum[num_wavelengths];
   int half_width = width / 2;
   float3 cam_pos = make_float3(0, 0, earth_radius + altitude);
   float3 sun_dir = geographical_to_direction(sun_elevation, 0.0f);
@@ -295,6 +542,10 @@ void SKY_nishita_skymodel_precompute_texture(float *pixels,
   float latitude_step = M_PI_2_F / height;
   float longitude_step = M_2PI_F / width;
   float half_lat_step = latitude_step / 2.0f;
+
+  // Todo: Use better RNG (e.g. LD sequence)
+  uint32_t rng[4];
+  rng_seed(rng, start_y, width * 0x9a43b471 + height);
 
   for (int y = start_y; y < end_y; y++) {
     /* sample more pixels toward the horizon */
@@ -305,7 +556,13 @@ void SKY_nishita_skymodel_precompute_texture(float *pixels,
       float longitude = longitude_step * x - M_PI_F;
 
       float3 dir = geographical_to_direction(latitude, longitude);
-      single_scattering(dir, sun_dir, cam_pos, air_density, dust_density, ozone_density, spectrum);
+      float spectrum[num_wavelengths] = {0};
+      if (multi_scattering)
+        multiple_scattering(
+            dir, sun_dir, cam_pos, air_density, dust_density, ozone_density, spectrum, rng, 0);
+      else
+        single_scattering(
+            dir, sun_dir, cam_pos, air_density, dust_density, ozone_density, spectrum);
       float3 xyz = spec_to_xyz(spectrum);
 
       /* store pixels */
@@ -331,7 +588,8 @@ static void sun_radiation(float3 cam_dir,
                           float *r_spectrum)
 {
   float3 cam_pos = make_float3(0, 0, earth_radius + altitude);
-  float3 optical_depth = ray_optical_depth(cam_pos, cam_dir);
+  float sun_distance = atmosphere_intersection(cam_pos, cam_dir);
+  float3 optical_depth = ray_optical_depth(cam_pos, cam_dir, sun_distance);
 
   /* compute final spectrum */
   for (int i = 0; i < num_wavelengths; i++) {

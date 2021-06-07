@@ -29,12 +29,14 @@ SkyLoader::SkyLoader(float sun_elevation,
                      float altitude,
                      float air_density,
                      float dust_density,
-                     float ozone_density)
+                     float ozone_density,
+                     bool multi_scattering)
     : sun_elevation(sun_elevation),
       altitude(altitude),
       air_density(air_density),
       dust_density(dust_density),
-      ozone_density(ozone_density)
+      ozone_density(ozone_density),
+      multi_scattering(multi_scattering)
 {
 }
 
@@ -42,8 +44,16 @@ SkyLoader::~SkyLoader(){};
 
 bool SkyLoader::load_metadata(const ImageDeviceFeatures &, ImageMetaData &metadata)
 {
-  metadata.width = 512;
-  metadata.height = 128;
+  /* if multiscattering model is selected then render a smaller image for performance
+   *  using same resolution for debugging */
+  if (multi_scattering) {
+    metadata.width = 256;
+    metadata.height = 64;
+  }
+  else {
+    metadata.width = 256;
+    metadata.height = 64;
+  }
   metadata.channels = 3;
   metadata.depth = 1;
   metadata.type = IMAGE_DATA_TYPE_FLOAT4;
@@ -75,7 +85,8 @@ bool SkyLoader::load_pixels(const ImageMetaData &metadata,
                                                          altitude,
                                                          air_density,
                                                          dust_density,
-                                                         ozone_density);
+                                                         ozone_density,
+                                                         multi_scattering);
                });
 
   return true;

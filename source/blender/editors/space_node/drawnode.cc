@@ -815,7 +815,8 @@ static void node_shader_buts_tex_sky(uiLayout *layout, bContext *UNUSED(C), Poin
     uiItemR(layout, ptr, "turbidity", DEFAULT_FLAGS, nullptr, ICON_NONE);
     uiItemR(layout, ptr, "ground_albedo", DEFAULT_FLAGS, nullptr, ICON_NONE);
   }
-  if (RNA_enum_get(ptr, "sky_type") == SHD_SKY_NISHITA) {
+  if (RNA_enum_get(ptr, "sky_type") == SHD_SKY_NISHITA ||
+      RNA_enum_get(ptr, "sky_type") == SHD_SKY_MULTIPLE) {
     uiItemR(layout, ptr, "sun_disc", DEFAULT_FLAGS, nullptr, 0);
 
     uiLayout *col;

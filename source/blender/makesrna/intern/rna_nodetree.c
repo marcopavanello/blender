@@ -5018,6 +5018,7 @@ static void def_sh_tex_sky(StructRNA *srna)
       {SHD_SKY_PREETHAM, "PREETHAM", 0, "Preetham", "Preetham 1999"},
       {SHD_SKY_HOSEK, "HOSEK_WILKIE", 0, "Hosek / Wilkie", "Hosek / Wilkie 2012"},
       {SHD_SKY_NISHITA, "NISHITA", 0, "Nishita", "Nishita 1993 improved"},
+      {SHD_SKY_MULTIPLE, "MULTIPLE", 0, "Multiple Scattering", "Multiple Scattering sky"},
       {0, NULL, 0, NULL, NULL},
   };
   static float default_dir[3] = {0.0f, 0.0f, 1.0f};

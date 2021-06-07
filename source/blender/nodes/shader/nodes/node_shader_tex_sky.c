@@ -51,7 +51,7 @@ static void node_shader_init_tex_sky(bNodeTree *UNUSED(ntree), bNode *node)
   tex->air_density = 1.0f;
   tex->dust_density = 1.0f;
   tex->ozone_density = 1.0f;
-  tex->sky_model = SHD_SKY_NISHITA;
+  tex->sky_model = SHD_SKY_MULTIPLE;
   node->storage = tex;
 }
 
@@ -200,7 +200,9 @@ static void node_shader_update_sky(bNodeTree *UNUSED(ntree), bNode *node)
   bNodeSocket *sockVector = nodeFindSocket(node, SOCK_IN, "Vector");
 
   NodeTexSky *tex = (NodeTexSky *)node->storage;
-  nodeSetSocketAvailability(sockVector, !(tex->sky_model == 2 && tex->sun_disc == 1));
+  /* remove Vector input for Nishita and Multiple */
+  nodeSetSocketAvailability(sockVector,
+                            !((tex->sky_model == 2 || tex->sky_model == 3) && tex->sun_disc == 1));
 }
 
 /* node type definition */
@@ -214,7 +216,6 @@ void register_node_type_sh_tex_sky(void)
   node_type_init(&ntype, node_shader_init_tex_sky);
   node_type_storage(&ntype, "NodeTexSky", node_free_standard_storage, node_copy_standard_storage);
   node_type_gpu(&ntype, node_shader_gpu_tex_sky);
-  /* remove Vector input for Nishita */
   node_type_update(&ntype, node_shader_update_sky);
 
   nodeRegisterType(&ntype);

@@ -751,16 +751,16 @@ static void sky_texture_precompute_hosek(SunSky *sunsky,
   SKY_arhosekskymodelstate_free(sky_state);
 }
 
-/* Nishita improved */
-static void sky_texture_precompute_nishita(SunSky *sunsky,
-                                           bool sun_disc,
-                                           float sun_size,
-                                           float sun_intensity,
-                                           float sun_elevation,
-                                           float sun_rotation,
-                                           float altitude,
-                                           float air_density,
-                                           float dust_density)
+/* Nishita improved and Multiple Scattering */
+static void sky_texture_precompute(SunSky *sunsky,
+                                   bool sun_disc,
+                                   float sun_size,
+                                   float sun_intensity,
+                                   float sun_elevation,
+                                   float sun_rotation,
+                                   float altitude,
+                                   float air_density,
+                                   float dust_density)
 {
   /* sample 2 sun pixels */
   float pixel_bottom[3];
@@ -796,7 +796,8 @@ NODE_DEFINE(SkyTextureNode)
   type_enum.insert("preetham", NODE_SKY_PREETHAM);
   type_enum.insert("hosek_wilkie", NODE_SKY_HOSEK);
   type_enum.insert("nishita_improved", NODE_SKY_NISHITA);
-  SOCKET_ENUM(sky_type, "Type", type_enum, NODE_SKY_NISHITA);
+  type_enum.insert("multiple_scattering", NODE_SKY_MULTIPLE);
+  SOCKET_ENUM(sky_type, "Type", type_enum, NODE_SKY_MULTIPLE);
 
   SOCKET_VECTOR(sun_direction, "Sun Direction", make_float3(0.0f, 0.0f, 1.0f));
   SOCKET_FLOAT(turbidity, "Turbidity", 2.2f);
@@ -832,30 +833,40 @@ void SkyTextureNode::compile(SVMCompiler &compiler)
     sky_texture_precompute_preetham(&sunsky, sun_direction, turbidity);
   else if (sky_type == NODE_SKY_HOSEK)
     sky_texture_precompute_hosek(&sunsky, sun_direction, turbidity, ground_albedo);
-  else if (sky_type == NODE_SKY_NISHITA) {
+  else if (sky_type == NODE_SKY_NISHITA || sky_type == NODE_SKY_MULTIPLE) {
     /* Clamp altitude to reasonable values.
      * Below 1m causes numerical issues and above 60km is space. */
     float clamped_altitude = clamp(altitude, 1.0f, 59999.0f);
+    /* flag for either single or multi scattering */
+    bool multi_scattering;
+    if (sky_type == NODE_SKY_MULTIPLE)
+      multi_scattering = true;
+    else
+      multi_scattering = false;
 
-    sky_texture_precompute_nishita(&sunsky,
-                                   sun_disc,
-                                   get_sun_size(),
-                                   sun_intensity,
-                                   sun_elevation,
-                                   sun_rotation,
-                                   clamped_altitude,
-                                   air_density,
-                                   dust_density);
+    sky_texture_precompute(&sunsky,
+                           sun_disc,
+                           get_sun_size(),
+                           sun_intensity,
+                           sun_elevation,
+                           sun_rotation,
+                           clamped_altitude,
+                           air_density,
+                           dust_density);
     /* precomputed texture image parameters */
     ImageManager *image_manager = compiler.scene->image_manager;
     ImageParams impar;
-    impar.interpolation = INTERPOLATION_LINEAR;
+    impar.interpolation = INTERPOLATION_CLOSEST;
     impar.extension = EXTENSION_EXTEND;
 
     /* precompute sky texture */
     if (handle.empty()) {
-      SkyLoader *loader = new SkyLoader(
-          sun_elevation, clamped_altitude, air_density, dust_density, ozone_density);
+      SkyLoader *loader = new SkyLoader(sun_elevation,
+                                        clamped_altitude,
+                                        air_density,
+                                        dust_density,
+                                        ozone_density,
+                                        multi_scattering);
       handle = image_manager->add_image(loader, impar);
     }
   }
@@ -867,7 +878,7 @@ void SkyTextureNode::compile(SVMCompiler &compiler)
   compiler.stack_assign(color_out);
   compiler.add_node(NODE_TEX_SKY, vector_offset, compiler.stack_assign(color_out), sky_type);
   /* nishita doesn't need this data */
-  if (sky_type != NODE_SKY_NISHITA) {
+  if (sky_type == NODE_SKY_PREETHAM || sky_type == NODE_SKY_HOSEK) {
     compiler.add_node(__float_as_uint(sunsky.phi),
                       __float_as_uint(sunsky.theta),
                       __float_as_uint(sunsky.radiance_x),
@@ -932,26 +943,36 @@ void SkyTextureNode::compile(OSLCompiler &compiler)
     /* Clamp altitude to reasonable values.
      * Below 1m causes numerical issues and above 60km is space. */
     float clamped_altitude = clamp(altitude, 1.0f, 59999.0f);
+    /* flag for either single or multi scattering */
+    bool multi_scattering;
+    if (sky_type == NODE_SKY_MULTIPLE)
+      multi_scattering = true;
+    else
+      multi_scattering = false;
 
-    sky_texture_precompute_nishita(&sunsky,
-                                   sun_disc,
-                                   get_sun_size(),
-                                   sun_intensity,
-                                   sun_elevation,
-                                   sun_rotation,
-                                   clamped_altitude,
-                                   air_density,
-                                   dust_density);
+    sky_texture_precompute(&sunsky,
+                           sun_disc,
+                           get_sun_size(),
+                           sun_intensity,
+                           sun_elevation,
+                           sun_rotation,
+                           clamped_altitude,
+                           air_density,
+                           dust_density);
     /* precomputed texture image parameters */
     ImageManager *image_manager = compiler.scene->image_manager;
     ImageParams impar;
-    impar.interpolation = INTERPOLATION_LINEAR;
+    impar.interpolation = INTERPOLATION_CLOSEST;
     impar.extension = EXTENSION_EXTEND;
 
     /* precompute sky texture */
     if (handle.empty()) {
-      SkyLoader *loader = new SkyLoader(
-          sun_elevation, clamped_altitude, air_density, dust_density, ozone_density);
+      SkyLoader *loader = new SkyLoader(sun_elevation,
+                                        clamped_altitude,
+                                        air_density,
+                                        dust_density,
+                                        ozone_density,
+                                        multi_scattering);
       handle = image_manager->add_image(loader, impar);
     }
   }

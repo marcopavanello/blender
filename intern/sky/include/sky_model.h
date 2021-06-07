@@ -438,7 +438,8 @@ void SKY_nishita_skymodel_precompute_texture(float *pixels,
                                              float altitude,
                                              float air_density,
                                              float dust_density,
-                                             float ozone_density);
+                                             float ozone_density,
+                                             bool multi_scattering);
 
 void SKY_nishita_skymodel_precompute_sun(float sun_elevation,
                                          float angular_diameter,

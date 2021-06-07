@@ -1498,6 +1498,7 @@ enum {
 #define SHD_SKY_PREETHAM 0
 #define SHD_SKY_HOSEK 1
 #define SHD_SKY_NISHITA 2
+#define SHD_SKY_MULTIPLE 3
 
 /* environment texture */
 #define SHD_PROJ_EQUIRECTANGULAR 0
